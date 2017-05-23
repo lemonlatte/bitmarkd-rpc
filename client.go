@@ -77,8 +77,8 @@ func (bc *BitmarkdRPCClient) call(command string, args interface{}, reply interf
 				bc.Connect()
 				continue
 			}
-			return err
 		}
+		return err
 	}
 	return err
 }
