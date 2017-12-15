@@ -29,3 +29,9 @@ func (bc *BitmarkdRPCClient) Transfer(transfer transactionrecord.BitmarkTransfer
 	err := bc.call("Bitmark.Transfer", &transfer, &reply)
 	return reply, err
 }
+
+func (bc *BitmarkdRPCClient) CountersignTransfer(transfer transactionrecord.BitmarkTransferCountersigned) (json.RawMessage, error) {
+	var reply json.RawMessage
+	err := bc.call("Bitmark.Transfer", &transfer, &reply)
+	return reply, err
+}
