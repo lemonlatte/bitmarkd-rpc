@@ -40,7 +40,7 @@ func NewPersistentRPCClient(address string, timeout time.Duration) *PersistentRP
 	}
 }
 
-// Call is to make an RPC request. It will whether the connection is still alived.
+// Call is to make an RPC request. It will check whether the connection is still alive.
 // If not, it will try to create one.
 func (c *PersistentRPCClient) Call(serviceMethod string, args interface{}, reply interface{}) error {
 	client, err := c.client()
