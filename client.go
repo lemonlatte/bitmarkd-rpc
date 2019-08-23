@@ -24,7 +24,7 @@ type RPCEmptyArguments struct{}
 
 // PersistentRPCClient is client that will maintain a long-lived connection for requests
 type PersistentRPCClient struct {
-	sync.RWMutex
+	sync.Mutex
 	*rpc.Client
 	address   string
 	closed    chan struct{}
@@ -49,8 +49,6 @@ func (c *PersistentRPCClient) Call(serviceMethod string, args interface{}, reply
 		}
 	}
 
-	c.RLock()
-	defer c.RUnlock()
 	if !c.connected {
 		return ErrRPCConnectionClosed
 	}
