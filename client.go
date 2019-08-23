@@ -7,83 +7,148 @@ package bitmarkdClient
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/rpc"
 	"net/rpc/jsonrpc"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// ErrRPCConnection is an error for rpc connection
-var ErrRPCConnection = fmt.Errorf("can not connect to rpc server")
+var ErrRPCRequestTimeout = fmt.Errorf("rpc requests timed out")
+var ErrRPCConnectionClosed = fmt.Errorf("rpc connection closed")
+var ErrCannotEstablishConnection = fmt.Errorf("connection can not be established")
 
 // RPCEmptyArguments is an empty argument for rpc requests
 type RPCEmptyArguments struct{}
 
-// BitmarkdRPCClient is a struct for bitmarkd
-type BitmarkdRPCClient struct {
+// PersistentRPCClient is client that will maintain a long-lived connection for requests
+type PersistentRPCClient struct {
 	sync.Mutex
-	client     *rpc.Client
-	address    string
-	connected  bool
-	retryTimes uint
+	*rpc.Client
+	address   string
+	closed    chan struct{}
+	connected bool
+	timeout   time.Duration
 }
 
-// NewBitmarkdRPCClient is to create a rpc client for bitmarkd
-func New(address string) *BitmarkdRPCClient {
-	client := &BitmarkdRPCClient{
-		address:    address,
-		retryTimes: 3,
+func NewPersistentRPCClient(address string, timeout time.Duration) *PersistentRPCClient {
+	return &PersistentRPCClient{
+		address: address,
+		timeout: timeout,
+		closed:  make(chan struct{}),
 	}
-	return client
 }
 
-// Connect will establish rpc connection over tls
-func (bc *BitmarkdRPCClient) Connect() error {
-	bc.Lock()
-	defer bc.Unlock()
-	conn, err := tls.Dial("tcp", bc.address, &tls.Config{
+// Call is to make an RPC request. It will check whether the connection is still alive.
+// If not, it will try to create one.
+func (c *PersistentRPCClient) Call(serviceMethod string, args interface{}, reply interface{}) error {
+	client, err := c.client()
+	if err != nil {
+		return ErrCannotEstablishConnection
+	}
+
+	select {
+	case call := <-client.Go(serviceMethod, args, reply, make(chan *rpc.Call, 1)).Done:
+		return call.Error
+	case <-c.closed:
+		return ErrRPCConnectionClosed
+	case <-time.After(c.timeout):
+		return ErrRPCRequestTimeout
+	}
+}
+
+// Close will close the current connection
+func (c *PersistentRPCClient) Close() error {
+	c.Lock()
+	defer c.Unlock()
+
+	if !c.connected {
+		return nil
+	}
+
+	c.connected = false
+	close(c.closed)
+	return c.Client.Close()
+}
+
+// connect will establish a TCP connection to the remote
+func (c *PersistentRPCClient) client() (*rpc.Client, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	if c.connected {
+		return c.Client, nil
+	}
+
+	conn, err := tls.Dial("tcp", c.address, &tls.Config{
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("can not dial to: %s, error: %s", c.address, err.Error())
 	}
-	bc.client = jsonrpc.NewClient(conn)
-	bc.connected = true
-	return nil
+	c.connected = true
+	c.closed = make(chan struct{})
+	c.Client = jsonrpc.NewClient(conn)
+	return c.Client, nil
 }
 
-// Close will terminate the rpc connection
+// BitmarkdRPCClient is a client to make bitmarkd RPC requests. It maintains
+// a list of PersistentRPCClient that will create connections to bitmarkd.
+type BitmarkdRPCClient struct {
+	sync.RWMutex
+	counter   uint32
+	clients   map[string]*PersistentRPCClient
+	addresses []string
+}
+
+// NewBitmarkdRPCClient is to create a rpc client for bitmarkd
+func New(addresses []string, timeout time.Duration) *BitmarkdRPCClient {
+	clients := map[string]*PersistentRPCClient{}
+
+	for _, addr := range addresses {
+		clients[addr] = NewPersistentRPCClient(addr, timeout)
+	}
+
+	client := &BitmarkdRPCClient{
+		addresses: addresses,
+		clients:   clients,
+	}
+
+	return client
+}
+
+// Close will terminate all rpc clients
 func (bc *BitmarkdRPCClient) Close() {
-	bc.client.Close()
-	bc.connected = false
+	bc.Lock()
+	defer bc.Unlock()
+	for _, c := range bc.clients {
+		c.Close()
+	}
 }
 
+// client will return a client based on the addresses list in a round-robin manner
+func (bc *BitmarkdRPCClient) client() *PersistentRPCClient {
+	bc.RLock()
+	defer bc.RUnlock()
+	counter := atomic.AddUint32(&bc.counter, 1)
+	index := int(counter) % len(bc.addresses)
+	addr := bc.addresses[index]
+	return bc.clients[addr]
+}
+
+// call will first get a rpc client by `client` function and use that client to request an RPC
 func (bc *BitmarkdRPCClient) call(command string, args interface{}, reply interface{}) error {
-	if bc.client == nil {
-		err := bc.Connect()
-		if err != nil {
-			return ErrRPCConnection
+	client := bc.client()
+	err := client.Call(command, args, reply)
+	if err != nil {
+		if _, ok := err.(*net.OpError); ok {
+			client.Close()
 		}
-	}
 
-	var err error
-	for i := bc.retryTimes; i > 0; i-- {
-		err = bc.client.Call(command, args, reply)
-
-		if err != nil {
-			if err == rpc.ErrShutdown {
-				time.Sleep(time.Second)
-				bc.connected = false
-				bc.Connect()
-				continue
-			}
+		if err == rpc.ErrShutdown {
+			client.Close()
 		}
-		return err
 	}
 	return err
-}
-
-// Address returns the ip address of the rpc server
-func (bc *BitmarkdRPCClient) Address() string {
-	return bc.address
 }
