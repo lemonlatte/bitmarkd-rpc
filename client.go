@@ -43,18 +43,13 @@ func NewPersistentRPCClient(address string, timeout time.Duration) *PersistentRP
 // Call is to make an RPC request. It will whether the connection is still alived.
 // If not, it will try to create one.
 func (c *PersistentRPCClient) Call(serviceMethod string, args interface{}, reply interface{}) error {
-	if !c.connected {
-		if err := c.connect(); err != nil {
-			return ErrCannotEstablishConnection
-		}
-	}
-
-	if !c.connected {
-		return ErrRPCConnectionClosed
+	client, err := c.client()
+	if err != nil {
+		return ErrCannotEstablishConnection
 	}
 
 	select {
-	case call := <-c.Client.Go(serviceMethod, args, reply, make(chan *rpc.Call, 1)).Done:
+	case call := <-client.Go(serviceMethod, args, reply, make(chan *rpc.Call, 1)).Done:
 		return call.Error
 	case <-c.closed:
 		return ErrRPCConnectionClosed
@@ -78,24 +73,24 @@ func (c *PersistentRPCClient) Close() error {
 }
 
 // connect will establish a TCP connection to the remote
-func (c *PersistentRPCClient) connect() error {
+func (c *PersistentRPCClient) client() (*rpc.Client, error) {
 	c.Lock()
 	defer c.Unlock()
 
 	if c.connected {
-		return nil
+		return c.Client, nil
 	}
 
 	conn, err := tls.Dial("tcp", c.address, &tls.Config{
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		return fmt.Errorf("can not dial to: %s, error: %s", c.address, err.Error())
+		return nil, fmt.Errorf("can not dial to: %s, error: %s", c.address, err.Error())
 	}
 	c.connected = true
 	c.closed = make(chan struct{})
 	c.Client = jsonrpc.NewClient(conn)
-	return nil
+	return c.Client, nil
 }
 
 // BitmarkdRPCClient is a client to make bitmarkd RPC requests. It maintains

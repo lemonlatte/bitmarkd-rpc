@@ -111,7 +111,7 @@ func TestPersistentRPCClientConnectClosed(t *testing.T) {
 	var reply TestReply
 
 	go func() {
-		time.Sleep(0)
+		time.Sleep(10 * time.Millisecond)
 		c.Close()
 	}()
 
